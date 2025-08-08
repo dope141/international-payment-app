@@ -101,3 +101,4 @@ if uploaded_file:
         st.error(f"Error processing PDF: {e}")
 else:
     st.info("Please upload a PDF to begin.")
+
