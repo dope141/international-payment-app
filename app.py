@@ -5,50 +5,50 @@ import pandas as pd
 
 st.title("International Transaction Date and Deposit Amount Extractor")
 
-st.write("""
-Upload your bank statement PDF. The app will detect all international payments by scanning for international payment keywords, 
-currencies, service providers, and "Purpose Code". It extracts the date, deposit amount, and shows the matched keyword that caused detection.
-""")
-
-# Expanded international keywords excluding Indian payment methods
-keywords = [
-    # Service Providers
-    "SKYDO", "WISE", "PAYONEER", "PAYPAL", "TRANSFERWISE", "WESTERN UNION",
-    "MONEYGRAM", "XOOM", "WORLDREMIT", "AZIMO", "REMITLY", "RIA", "OFX",
-    "XE", "TRANSFERGO", "TORFX",
-    # Currencies
-    "USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "CNY", "SGD", "MXN",
-    "NZD", "ZAR", "HKD", "NOK", "SEK", "DKK", "RUB", "TRY", "BRL",
-    # International Payment Methods (Expanded)
-    "SWIFT", "ACH", "FPS", "GIRO", "INTERAC", "EFT", "AUTOPAY", "P2P", "OBT",
-    "BACS", "CHAPS", "SEPA", "IBAN", "SORT CODE", "ABA", "MT103",
-    "CROSS BORDER", "WIRE", "REMITTANCE", "TRUSTLY", "CLEARING", "DEUTSCHE", "NOSTRO"
-]
-
-# Convert keywords to uppercase for case-insensitive matching
-keywords = [kw.upper() for kw in keywords]
-
-uploaded_file = st.file_uploader("Upload your bank statement PDF", type=["pdf"])
+keywords_input = st.sidebar.text_area(
+    "Enter International Payment Keywords (comma-separated):",
+    value="SKYDO,WESTERN UNION,WISE,PAYONEER,PAYPAL,TRANSFERWISE,AMAZON,UPWORK,SMARTPAYNI,CMS TRANSACTION,PURPOSE CODE,USD,EUR,GBP,CAD,AUD"
+)
+keywords = [kw.strip().upper() for kw in keywords_input.split(",") if kw.strip()]
 
 def clean_indian_amount(amount_str):
-    # Remove all commas (Indian style thousands/lakhs separators), keep dot as decimal
     cleaned = amount_str.replace(',', '')
     try:
         return float(cleaned)
     except:
         return 0.0
 
-def parse_date(d):
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y"):
-        try:
-            return pd.to_datetime(d, format=fmt)
-        except:
-            pass
-    try:
-        return pd.to_datetime(d, dayfirst=True, errors='coerce')
-    except:
-        return pd.NaT
+def parse_date(line):
+    date_pattern = r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b'
+    match = re.search(date_pattern, line)
+    return match.group(0) if match else ""
 
+def find_deposit_amount(line):
+    amount_matches = re.findall(r'([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.\d{2})?)', line)
+    # For statements like "Amount (INR) <amount> CR <balance>",
+    # the deposit is usually the first or second number before 'CR' or 'CREDIT'
+    # We'll try to find amount just before 'CR' or 'CREDIT'
+    if 'CR' in line.upper() or 'CREDIT' in line.upper():
+        parts = re.split(r'CR|CREDIT', line, flags=re.IGNORECASE)
+        left = parts[0]
+        # Find rightmost number in that left part
+        amount_matches = re.findall(r'([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.\d{2})?)', left)
+        if amount_matches:
+            return amount_matches[-1]
+    # Else return the last large number in the line
+    if amount_matches:
+        return amount_matches[-1]
+    return ""
+
+def get_matched_keyword(line, keywords):
+    if 'PURPOSE CODE' in line.upper():
+        return 'PURPOSE CODE'
+    for kw in keywords:
+        if kw in line.upper():
+            return kw
+    return None
+
+uploaded_file = st.file_uploader("Upload your bank statement PDF", type=["pdf"])
 if uploaded_file:
     try:
         with pdfplumber.open(uploaded_file) as pdf:
@@ -59,79 +59,45 @@ if uploaded_file:
                     full_text += page_text + "\n"
 
         lines = full_text.split("\n")
-
-        # List to hold extracted transaction tuples: (date, deposit_amount_str, matched_keyword)
         transactions = []
 
-        # Regex for dates like 01/01/2025, 1-1-25 etc.
-        date_pattern = re.compile(r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b')
-
-        # Regex to find amounts: numbers with commas and decimals, possibly preceded by currency symbols or words
-        amount_pattern = re.compile(r'([\d,]+(?:\.\d{2})?)')
-
         for line in lines:
-            line_upper = line.upper()
-
-            matched_keyword = None
-            # Check for "Purpose Code" first (strong international payment flag)
-            if "PURPOSE CODE" in line_upper:
-                matched_keyword = "PURPOSE CODE"
-            else:
-                # Check for any keyword match
-                for kw in keywords:
-                    if kw in line_upper:
-                        matched_keyword = kw
-                        break
-
+            matched_keyword = get_matched_keyword(line, keywords)
             if matched_keyword:
-                # Extract date
-                dates = date_pattern.findall(line)
-                date = dates[0] if dates else ""
+                # Only extract for credits ("CR", "CREDIT") not debits ("DR") if DR/CR shown
+                if 'DR' in line.upper() and not 'CR' in line.upper():
+                    continue  # skip debit lines, focus only on credits/receipts
 
-                # Extract deposit amount - focus on amounts appearing typically in deposit column
-                # Approach: assume last numeric amount in line is the deposit amount (common in statements)
-                amounts = amount_pattern.findall(line)
-                deposit_amount_str = amounts[-1] if amounts else ""
-
-                # Only keep if we have date and deposit amount
-                if date and deposit_amount_str:
-                    transactions.append((date, deposit_amount_str, matched_keyword))
+                date = parse_date(line)
+                deposit_str = find_deposit_amount(line)
+                deposit_amt = clean_indian_amount(deposit_str)
+                if date and deposit_amt > 0:
+                    transactions.append((date, deposit_str, deposit_amt, matched_keyword, line))
 
         if not transactions:
-            st.info("No international transactions found based on keywords or 'Purpose Code'. Please check your statement or keywords.")
+            st.info("No international transactions found. Try changing keywords or check your statement format.")
         else:
-            # Create DataFrame
-            df_trans = pd.DataFrame(transactions, columns=["Date", "Deposit Amount", "Matched Keyword"])
+            df = pd.DataFrame(transactions, columns=["Date", "Deposit Amount", "Amount Value", "Matched Keyword", "Raw Line Preview"])
+            df["ParsedDate"] = pd.to_datetime(df["Date"], dayfirst=True, errors='coerce')
+            df = df.dropna(subset=["ParsedDate"])
+            df["YearMonth"] = df["ParsedDate"].dt.to_period('M')
 
-            # Parse and clean data for analysis
-            df_trans["ParsedDate"] = df_trans["Date"].apply(parse_date)
-            df_trans = df_trans.dropna(subset=["ParsedDate"])
-
-            df_trans["AmountValue"] = df_trans["Deposit Amount"].apply(clean_indian_amount)
-
-            # Group by Year-Month
-            df_trans["YearMonth"] = df_trans["ParsedDate"].dt.to_period('M')
-
-            monthly_summary = df_trans.groupby("YearMonth").agg(
-                Number_of_Transactions=("Date", "count"),
-                Total_Amount=("AmountValue", "sum"),
+            monthly_summary = df.groupby("YearMonth").agg(
+                Transactions=("Date", "count"),
+                Total_Amount=("Amount Value", "sum"),
             ).reset_index()
-
             monthly_summary["YearMonth"] = monthly_summary["YearMonth"].dt.strftime('%b %Y')
 
-            st.subheader("International Payment Details")
-            st.table(df_trans[["Date", "Deposit Amount", "Matched Keyword"]])
+            st.subheader("Raw Matched Transactions")
+            st.dataframe(df[["Date", "Deposit Amount", "Amount Value", "Matched Keyword", "Raw Line Preview"]])
 
             st.subheader("Monthly Summary of International Transactions")
             st.dataframe(monthly_summary.rename(columns={
                 "YearMonth": "Month",
-                "Number_of_Transactions": "Number of Transactions",
+                "Transactions": "Number of Transactions",
                 "Total_Amount": "Total Deposit Amount"
             }))
-
     except Exception as e:
         st.error(f"Error processing PDF: {e}")
-
 else:
-    st.info("Please upload a PDF file to start extracting international transactions.")
-
+    st.info("Please upload a PDF to begin.")
