@@ -1,16 +1,14 @@
 import streamlit as st
 import pandas as pd
-import pdfplumber
 import re
-from collections import defaultdict
-from datetime import datetime
+import io
+import pdfplumber
 
-# ------------ Default filters ------------
+# ------------ DEFAULT FILTER LISTS ------------
 DEFAULT_CURRENCIES = [
-    "USD","EUR","GBP","AUD","CAD","JPY","CHF","SGD","AED","NZD","ZAR","HKD","SAR","MYR","NOK",
-    "SEK","DKK","KRW","MXN","BRL","TRY","PLN","CZK","HUF","ILS","THB","IDR","TWD","COP","RUB",
-    "CNY","XOF","KES","PHP","ARS","EGP","PKR","BDT","VND","LKR","QAR","UAH","CLP","ISK","BGN",
-    "RON","HNL","NGN","HRK","UYU","JOD","OMR"
+    "USD","EUR","GBP","AUD","CAD","JPY","CHF","SGD","AED","NZD","ZAR","HKD","SAR","MYR","NOK","SEK","DKK","KRW",
+    "MXN","BRL","TRY","PLN","CZK","HUF","ILS","THB","IDR","TWD","COP","RUB","CNY","XOF","KES","PHP","ARS","EGP",
+    "PKR","BDT","VND","LKR","QAR","UAH","CLP","ISK","BGN","RON","HNL","NGN","HRK","UYU","JOD","OMR"
 ]
 
 DEFAULT_INTL_METHODS = [
@@ -46,8 +44,14 @@ DEFAULT_PURPOSE_CODES = [
     "P1506","P1507","P1508","P1509","P1510","P1590"
 ]
 
-# ---------- Sidebar filters ----------
+CREDIT_TERMS = [
+    "cr","credit","credited","credit received","amount received","payment received",
+    "transfer received","deposit","inward remittance","remittance credit","incoming payment","proceeds"
+]
+
+# ------------ Sidebar filters -------------
 st.sidebar.header("Keyword Filters")
+
 currencies = st.sidebar.text_area("Currencies (comma separated)", value=",".join(DEFAULT_CURRENCIES))
 intl_methods = st.sidebar.text_area("International Methods", value=",".join(DEFAULT_INTL_METHODS))
 ecom = st.sidebar.text_area("E-Commerce Providers", value=",".join(DEFAULT_ECOM))
@@ -66,12 +70,12 @@ include_keywords = (
 )
 exclude_keywords_list = [k.strip().lower() for k in exclude_keywords.split(",") if k.strip()]
 
-# ------------ App UI -------------
 st.title("🌐 International Transactions Extractor (Offline Mode)")
+
 uploaded_file = st.file_uploader("Upload your Bank Statement PDF", type=["pdf"])
 
+# --- Helper function to parse date and amount ---
 def parse_line_for_date_amount(line: str):
-    # Attempt to parse a date in the formats dd/mm/yyyy, dd-mm-yyyy, etc.
     date_match = re.search(r"\b\d{2}[-/]\d{2}[-/]\d{2,4}\b", line)
     date_val = None
     if date_match:
@@ -79,7 +83,6 @@ def parse_line_for_date_amount(line: str):
             date_val = pd.to_datetime(date_match.group(), dayfirst=True, errors='coerce')
         except:
             date_val = None
-    # Attempt to parse amount (look for numbers with commas and decimals)
     amount_match = re.search(r"[-+]?\d{1,3}(?:,\d{3})*(?:\.\d+)?", line.replace(",",""))
     amount_val = None
     if amount_match:
@@ -113,7 +116,7 @@ def extract_transactions(pdf_text, includes, excludes):
         })
     return records
 
-def display_monthly_summary(df: pd.DataFrame):
+def display_monthly_summary(df):
     if df.empty:
         st.warning("No transactions found.")
         return
@@ -135,10 +138,13 @@ def display_monthly_summary(df: pd.DataFrame):
         st.divider()
 
 if uploaded_file is not None:
+    import pdfplumber
     with pdfplumber.open(uploaded_file) as pdf:
         full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-    trans = extract_transactions(full_text, include_keywords, exclude_keywords_list)
-    df = pd.DataFrame(trans)
+
+    transactions = extract_transactions(full_text, include_keywords, exclude_keywords_list)
+    df = pd.DataFrame(transactions)
+
     if not df.empty:
         df = df.sort_values("Date")
     display_monthly_summary(df)
