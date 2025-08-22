@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
 import pdfplumber
-import io
 import re
 from collections import defaultdict
+from datetime import datetime
 
-# ------------------ DEFAULT FILTER LISTS ------------------
+# ------------ Default filters ------------
 DEFAULT_CURRENCIES = [
     "USD","EUR","GBP","AUD","CAD","JPY","CHF","SGD","AED","NZD","ZAR","HKD","SAR","MYR","NOK",
     "SEK","DKK","KRW","MXN","BRL","TRY","PLN","CZK","HUF","ILS","THB","IDR","TWD","COP","RUB",
@@ -46,11 +46,7 @@ DEFAULT_PURPOSE_CODES = [
     "P1506","P1507","P1508","P1509","P1510","P1590"
 ]
 
-# ------------------ STREAMLIT UI ------------------
-st.title("📊 International Payment Statement Analyzer")
-
-uploaded_file = st.file_uploader("Upload your bank statement (PDF)", type=["pdf"])
-
+# ---------- Sidebar filters ----------
 st.sidebar.header("Keyword Filters")
 currencies = st.sidebar.text_area("Currencies (comma separated)", value=",".join(DEFAULT_CURRENCIES))
 intl_methods = st.sidebar.text_area("International Methods", value=",".join(DEFAULT_INTL_METHODS))
@@ -60,69 +56,91 @@ purpose_codes = st.sidebar.text_area("Purpose Codes", value=",".join(DEFAULT_PUR
 extra_include = st.sidebar.text_area("Extra Include Keywords", "")
 exclude_keywords = st.sidebar.text_area("Exclude Keywords", "")
 
-# ------------------ PROCESS PDF ------------------
-def extract_text_from_pdf(file):
-    text = ""
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            text += page.extract_text() + "\n"
-    return text
+include_keywords = (
+    [k.strip().lower() for k in currencies.split(",") if k.strip()] +
+    [k.strip().lower() for k in intl_methods.split(",") if k.strip()] +
+    [k.strip().lower() for k in ecom.split(",") if k.strip()] +
+    [k.strip().lower() for k in forex_providers.split(",") if k.strip()] +
+    [k.strip().lower() for k in purpose_codes.split(",") if k.strip()] +
+    [k.strip().lower() for k in extra_include.split(",") if k.strip()]
+)
+exclude_keywords_list = [k.strip().lower() for k in exclude_keywords.split(",") if k.strip()]
 
-def process_transactions(text, include_keywords, exclude_keywords):
-    transactions = []
-    monthly_data = defaultdict(list)
+# ------------ App UI -------------
+st.title("🌐 International Transactions Extractor (Offline Mode)")
+uploaded_file = st.file_uploader("Upload your Bank Statement PDF", type=["pdf"])
 
-    lines = text.splitlines()
-    for line in lines:
-        if any(word in line.lower() for word in exclude_keywords):
+def parse_line_for_date_amount(line: str):
+    # Attempt to parse a date in the formats dd/mm/yyyy, dd-mm-yyyy, etc.
+    date_match = re.search(r"\b\d{2}[-/]\d{2}[-/]\d{2,4}\b", line)
+    date_val = None
+    if date_match:
+        try:
+            date_val = pd.to_datetime(date_match.group(), dayfirst=True, errors='coerce')
+        except:
+            date_val = None
+    # Attempt to parse amount (look for numbers with commas and decimals)
+    amount_match = re.search(r"[-+]?\d{1,3}(?:,\d{3})*(?:\.\d+)?", line.replace(",",""))
+    amount_val = None
+    if amount_match:
+        try:
+            amount_val = float(amount_match.group())
+        except:
+            amount_val = None
+    return date_val, amount_val
+
+def extract_transactions(pdf_text, includes, excludes):
+    records = []
+    for line in pdf_text.split("\n"):
+        lline = line.lower()
+        if any(excl in lline for excl in excludes):
             continue
-        if any(word in line.lower() for word in include_keywords):
-            transactions.append(line)
-            # Extract month if present
-            month_match = re.search(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b", line, re.IGNORECASE)
-            if month_match:
-                month = month_match.group(0).capitalize()
-                monthly_data[month].append(line)
+        matched_kw = None
+        for kw in includes:
+            if kw in lline:
+                matched_kw = kw
+                break
+        if not matched_kw:
+            continue
+        date_val, amount_val = parse_line_for_date_amount(line)
+        if date_val is None or amount_val is None:
+            continue
+        records.append({
+            "Date": date_val,
+            "Amount": amount_val,
+            "Keyword Triggered": matched_kw,
+            "Narration": line.strip()
+        })
+    return records
 
-    return transactions, monthly_data
+def display_monthly_summary(df: pd.DataFrame):
+    if df.empty:
+        st.warning("No transactions found.")
+        return
+    df["Month"] = df["Date"].dt.to_period("M").astype(str)
+    grand_total = df["Amount"].sum()
+    grand_count = len(df)
+    st.markdown(f"### Grand Total: ₹{grand_total:,.2f}")
+    st.markdown(f"### Grand Count: {grand_count}")
+    st.divider()
 
-# ------------------ MAIN LOGIC ------------------
+    for month, group in df.groupby("Month", sort=True):
+        st.subheader(f"📅 {month}")
+        display_cols = ["Date", "Amount", "Keyword Triggered", "Narration"]
+        st.dataframe(group[display_cols], use_container_width=True)
+        month_total = group["Amount"].sum()
+        month_count = len(group)
+        st.markdown(f"**Total for {month}: ₹{month_total:,.2f}**")
+        st.markdown(f"**Count for {month}: {month_count}**")
+        st.divider()
+
 if uploaded_file is not None:
-    text = extract_text_from_pdf(uploaded_file)
-
-    include_keywords = [kw.strip().lower() for kw in (currencies + "," + intl_methods + "," + ecom + "," + forex_providers + "," + purpose_codes + "," + extra_include).split(",") if kw.strip()]
-    exclude_keywords = [kw.strip().lower() for kw in exclude_keywords.split(",") if kw.strip()]
-
-    transactions, monthly_data = process_transactions(text, include_keywords, exclude_keywords)
-
-    if not transactions:
-        st.warning("No matching transactions found with the given filters.")
-    else:
-        st.subheader("🔑 Keyword Triggered Transactions")
-        for t in transactions:
-            st.write(t)
-
-        grand_total = 0
-        grand_count = 0
-
-        st.subheader("📅 Monthly Breakdown")
-        for month, txns in monthly_data.items():
-            st.markdown(f"### {month}")
-            df = pd.DataFrame(txns, columns=["Transaction Details"])
-            st.dataframe(df)
-
-            # Dummy calculation for totals (replace with actual numeric extraction)
-            total_amount = len(txns) * 100  # Example placeholder
-            txn_count = len(txns)
-
-            st.write(f"**Total for {month}:** {total_amount}")
-            st.write(f"**Number of Transactions:** {txn_count}")
-            st.markdown("---")
-
-            grand_total += total_amount
-            grand_count += txn_count
-
-        # Grand total
-        st.subheader("📊 Grand Total Summary")
-        st.write(f"**Overall Total:** {grand_total}")
-        st.write(f"**Overall Transaction Count:** {grand_count}")
+    with pdfplumber.open(uploaded_file) as pdf:
+        full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    trans = extract_transactions(full_text, include_keywords, exclude_keywords_list)
+    df = pd.DataFrame(trans)
+    if not df.empty:
+        df = df.sort_values("Date")
+    display_monthly_summary(df)
+else:
+    st.info("Please upload a PDF to start.")
