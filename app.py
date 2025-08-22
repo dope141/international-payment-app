@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import json
 import re
-from PyPDF2 import PdfReader
+import pdfplumber  # ✅ using pdfplumber instead of PyPDF2
 
 # ------------ DEFAULT FILTER LISTS ------------
 DEFAULT_CURRENCIES = [
@@ -73,21 +73,16 @@ st.title("🌐 International Transactions Extractor (Offline Mode)")
 uploaded_file = st.file_uploader("Upload your Bank Statement PDF", type=["pdf"])
 
 def extract_transactions(pdf_text, includes, excludes, credit_mode=False):
-    """
-    Naive parser: looks for lines with dates, amounts, and narration.
-    Uses regex and keyword matching.
-    """
     records = []
     lines = pdf_text.split("\n")
-    date_pattern = r"\b\d{2}[-/]\d{2}[-/]\d{2,4}\b"  # e.g., 01-05-2024 or 01/05/24
-    amount_pattern = r"[-+]?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?"  # numbers like 1,234.56
+    date_pattern = r"\b\d{2}[-/]\d{2}[-/]\d{2,4}\b"
+    amount_pattern = r"[-+]?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?"
 
     for line in lines:
         lline = line.lower()
         if any(exc in lline for exc in excludes):
             continue
 
-        # check if keywords present
         matched_keyword = None
         for kw in includes:
             if kw.lower() in lline:
@@ -97,15 +92,12 @@ def extract_transactions(pdf_text, includes, excludes, credit_mode=False):
         if not matched_keyword:
             continue
 
-        # check credit mode filter
         if credit_mode and not any(term in lline for term in CREDIT_TERMS):
             continue
 
-        # extract date
         date_match = re.search(date_pattern, line)
         date_val = date_match.group() if date_match else None
 
-        # extract amount
         amt_match = re.search(amount_pattern, line.replace(",", ""))
         amount_val = float(amt_match.group()) if amt_match else None
 
@@ -120,10 +112,13 @@ def extract_transactions(pdf_text, includes, excludes, credit_mode=False):
     return records
 
 if uploaded_file:
-    reader = PdfReader(uploaded_file)
+    # ✅ extract text with pdfplumber
     pdf_text = ""
-    for page in reader.pages:
-        pdf_text += page.extract_text() + "\n"
+    with pdfplumber.open(uploaded_file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                pdf_text += text + "\n"
 
     # ---- CREDIT MODE ----
     with st.spinner("Processing Credit Transactions..."):
