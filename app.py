@@ -102,32 +102,38 @@ def extract_tabular_from_pdf(uploaded_file):
             if tables:
                 for table in tables:
                     df = pd.DataFrame(table)
+                    df = df.dropna(how="all").reset_index(drop=True)
                     for _, row in df.iterrows():
                         row_str = " ".join(str(x) for x in row if pd.notna(x)).lower()
                         found = [kw for kw in all_keywords if kw in row_str]
-                        if found:
-                            date_val = None
-                            for cell in row:
-                                if pd.notna(cell) and DATE_RE.search(str(cell)):
-                                    date_val = DATE_RE.search(str(cell)).group()
-                                    break
-                            if date_val:
-                                last_date = date_val
-                            amt_val, drcr = None, ""
-                            for cell in row:
-                                if pd.notna(cell):
-                                    m_amt = AMT_CRDR_RE.search(str(cell))
-                                    if m_amt:
-                                        amt_val = float(m_amt.group("amount").replace(",", ""))
-                                        drcr = (m_amt.group("dir") or "").upper()
-                            if amt_val is not None:
-                                transactions.append({
-                                    "Date": date_val or last_date,
-                                    "Amount": amt_val,
-                                    "DRCR": drcr,
-                                    "Keyword": ", ".join(sorted(set(found)))
-                                })
+
+                        # --- Date ---
+                        date_val = None
+                        for cell in row:
+                            if pd.notna(cell) and DATE_RE.search(str(cell)):
+                                date_val = DATE_RE.search(str(cell)).group()
+                                break
+                        if date_val:
+                            last_date = date_val
+
+                        # --- Amount ---
+                        amt_val, drcr = None, ""
+                        for cell in row:
+                            if pd.notna(cell):
+                                m_amt = AMT_CRDR_RE.search(str(cell))
+                                if m_amt:
+                                    amt_val = float(m_amt.group("amount").replace(",", ""))
+                                    drcr = (m_amt.group("dir") or "").upper()
+
+                        if found and amt_val is not None:
+                            transactions.append({
+                                "Date": date_val or last_date,
+                                "Amount": amt_val,
+                                "DRCR": drcr,
+                                "Keyword": ", ".join(sorted(set(found)))
+                            })
             else:
+                # fallback text-based extraction
                 lines = (page.extract_text() or "").split("\n")
                 for line in lines:
                     lcase = line.lower()
@@ -178,6 +184,7 @@ with col_main:
                 st.info("No international keywords found in the PDF content.")
             else:
                 df["Month-Year"] = df["Date"].apply(get_month_year)
+                df["Day"] = df["Date"].str.extract(r'(\d{2})')  # Extract day-of-month
                 df["Signed Amount"] = df.apply(
                     lambda r: r["Amount"] if r["DRCR"] == "CR" else -r["Amount"], axis=1
                 )
@@ -190,6 +197,7 @@ with col_main:
 
                 df_filtered = df[df.apply(filter_row, axis=1)].copy()
 
+                # === Monthly transaction tables ===
                 months = sorted(df_filtered["Month-Year"].dropna().unique())
                 for m in months:
                     month_df = df_filtered[df_filtered["Month-Year"] == m].copy()
@@ -204,6 +212,15 @@ with col_main:
                         f"**Net:** {net_total:,.2f}"
                     )
                     st.markdown("---")
+
+                # === Recurring Dates Table ===
+                recurring = df_filtered.groupby(["Day", "Month-Year"])["Signed Amount"].sum().reset_index()
+                recurring_days = recurring.groupby("Day")["Month-Year"].nunique()
+                recurring_days = recurring_days[recurring_days > 1].index.tolist()
+                recurring_final = recurring[recurring["Day"].isin(recurring_days)]
+                if not recurring_final.empty:
+                    st.markdown("## Recurring Dates Across Months")
+                    st.dataframe(recurring_final.sort_values(["Day", "Month-Year"]).reset_index(drop=True))
         else:
             st.warning("CSV handling remains same as before.")
     else:
